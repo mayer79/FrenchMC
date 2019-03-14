@@ -1,0 +1,195 @@
+---
+title: "DALEX with French Motor TPL insurance data"
+output:
+  html_document:
+    df_print: paged
+---
+
+# Introduction
+
+This notebook uses the bundle `DALEX` (descriptive machine learning explanations) to shed light on black box models in the context of claims frequency models. Some troubles with case weights (= exposure weights). 
+
+# Preparation: We start by loading
+
+- libraries,
+
+- functions as well as
+
+- data
+
+```{r, message=FALSE, warning=FALSE}
+# LIBRARIES
+
+library(CASdatasets)  # Download zip from http://cas.uqam.ca/ and install from local package source
+library(gbm)
+library(xgboost)
+library(DALEX) # For model interpretation
+library(ceterisParibus)
+library(tidyverse) # For data prep
+library(caret) # For data split
+
+# FUNCTIONS
+deviance_poisson <- function(y, pred) {
+  2 * mean(pred - y + log((y / pred)^y))
+}
+
+deviance_gamma <- function(y, pred) {
+  2 * mean((y - pred) / pred - log(y / pred))
+}
+
+# Transformer for XGBoost
+prep_mat <- function(data, response = TRUE) {
+  data[["Power"]] <- match(data[["Power"]], letters)
+  data[["Gas"]] <- data[["Gas"]] == "Diesel"
+  
+  if (response) {
+    data[[y_name]] <- data[[y_name]] / data[[w_name]]
+  }
+  data.matrix(data[, c(x_name, if (response) y_name, w_name)])
+}
+
+# DATA PREPARATION
+
+# Load the data
+data(freMTPLfreq) 
+
+# Some column names
+x_name <- c("CarAge", "DriverAge", "Power", "Gas", "Density")
+y_name <- "ClaimNb"
+w_name <- "Exposure"
+
+# Train/test split
+set.seed(3928272)
+ind <- caret::createDataPartition(freMTPLfreq[[y_name]], p = 0.80, list = FALSE) %>% c
+
+trainDF <- freMTPLfreq[ind, ]
+validDF <- freMTPLfreq[-ind, ]
+
+trainMat <- prep_mat(freMTPLfreq[ind, ])
+validMat <- prep_mat(freMTPLfreq[-ind, ])
+
+trainXgb <- xgb.DMatrix(trainMat[, x_name], 
+                        label = trainMat[, y_name], 
+                        weight = trainMat[, w_name])
+
+```
+
+# Then we fit three models 
+
+- Poisson GLM
+
+- Poisson tree booster with `gbm`
+
+- Poisson tree booster with `xgboost`
+
+```{r}
+head(freMTPLfreq[c(y_name, x_name, w_name)])
+summary(freMTPLfreq[c(y_name, x_name, w_name)])
+
+form <- ClaimNb ~ offset(log(Exposure)) + CarAge + DriverAge + Power + Gas + Density
+
+# Linear model
+(fit_glm <- glm(form, 
+                data = trainDF, 
+                family = poisson(link = log)))
+
+# Tree booster: gbm
+(fit_gbm <- gbm(form, 
+                data = trainDF, 
+                distribution = "poisson",
+                n.trees = 200, 
+                interaction.depth = 3, 
+                shrinkage = 0.05))
+
+# Tree booster: XGBoost
+param_xgb <- list(max_depth = 5, 
+                  learning_rate = 0.05, 
+                  nthread = 4, 
+                  objective = "count:poisson")
+
+(fit_xgb <- xgb.train(param_xgb,
+                      data = trainXgb,
+                      nrounds = 500))
+
+
+```
+
+# Explaining the models
+
+## Initializing the "explainer"
+```{r}
+explainer_glm <- explain(fit_glm, 
+                         data = validDF[c(x_name, w_name)], 
+                         y = validDF[[y_name]], 
+                         label = "glm", 
+                         predict_function = function(model, x) predict(model, x, type = "response"))
+
+explainer_gbm <- explain(fit_gbm, 
+                         data = validDF[c(x_name, w_name)], 
+                         y = validDF[[y_name]], 
+                         label = "gbm",
+                         predict_function = function(model, x) suppressWarnings(predict(model, 
+                                              x, n.trees = 200, type = "response") * x[[w_name]]))
+
+explainer_xgb <- explain(fit_xgb, 
+                         data = validDF[c(x_name, w_name)], 
+                         y = validDF[, y_name], 
+                         label = "xgb",
+                         predict_function = function(model, x) {x <- prep_mat(x, FALSE); predict(model, x[, x_name, drop = FALSE]) * x[, w_name]})
+
+explainers <- list(explainer_glm, explainer_gbm, explainer_xgb)
+```
+
+## Model performance
+
+Issue: The function `model_performance` allows to pass a loss function of the residuals (as single argument). But in our case, we would like to show deviance residuals which would require a more general interface.
+```{r}
+mp <- lapply(explainers, model_performance)
+do.call(plot, c(mp, geom = "boxplot"))
+```
+
+## Variable importance on permuting validation data
+Issue: `Exposure` is required for prediction, but it would be nice to have the option to skip some variables from the calculations. Here, we manually kick them out before plotting.
+```{r}
+vd <- lapply(explainers, variable_importance, loss_function = deviance_poisson, n_sample = -1)
+vd <- lapply(vd, function(x) subset(x, variable != "Exposure"))
+do.call(plot, vd)
+```
+
+## Variable importance ("prediction breakdown") for one single observation
+Issue: `Exposure` should not appear here. We would like to manually drop certain fields from calculations.
+```{r, fig.height=10}
+sp <- lapply(explainers, single_prediction, observation = validDF[1, ])
+do.call(plot, sp)
+```
+
+
+## Effect of driver age: ceteris paribus profiles across models
+```{r}
+picks <- 1
+cp <- lapply(explainers, 
+             ceteris_paribus, 
+             observations = validDF[picks, c(x_name, w_name)])
+
+do.call(plot, c(cp, color = "_label_", selected_variables = "DriverAge"))
+```
+
+## Effect of driver age: multiple ceteris paribus profiles for the XGBoost model
+```{r}
+picks <- 1:20
+cp <- ceteris_paribus(explainer_xgb, observations = validDF[picks, c(x_name, w_name)])
+plot(cp, selected_variables = "DriverAge")
+```
+
+## Effect of driver age: average of above profiles aka "partial dependence plots"
+```{r}
+plot(cp, selected_variables = "DriverAge", aggregate_profiles = mean)
+```
+
+## Variant: Look at profiles of close neighbours
+```{r}
+validDF[1, "DriverAge"]
+neigh <- select_neighbours(validDF, validDF[1, ])
+cp <- ceteris_paribus(explainer_xgb, observations = neigh)
+plot(cp, selected_variables = "DriverAge")
+```
