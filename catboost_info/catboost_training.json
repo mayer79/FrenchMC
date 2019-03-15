@@ -1,0 +1,8 @@
+{
+"meta":{"launch_mode":"Train","name":"experiment","iteration_count":250,"learn_metrics":[{"best_value":"Min","name":"Poisson"}],"test_sets":[],"test_metrics":[],"learn_sets":["learn"]},
+"iterations":[
+{"learn":[0.9577956738],"iteration":0,"passed_time":0.1220868769,"remaining_time":30.39963234},
+{"learn":[0.311618589],"iteration":100,"passed_time":9.699737205,"remaining_time":14.3095133},
+{"learn":[0.2701857693],"iteration":200,"passed_time":18.9583901,"remaining_time":4.621697088},
+{"learn":[0.2633644714],"iteration":249,"passed_time":23.39103588,"remaining_time":0}
+]}
