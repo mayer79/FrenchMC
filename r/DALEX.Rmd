@@ -7,9 +7,11 @@ output:
 
 # Introduction
 
-This notebook uses the bundle `DALEX` (descriptive machine learning explanations) to shed light on black box models in the context of claims frequency models. Some troubles with case weights (= exposure weights). 
+This notebook uses the bundle `DALEX` (descriptive machine learning explanations) to shed light on black box models in the context of claims frequency models. Some troubles with case weights (= exposure weights) became visible. If okay I will send over this notebook to DALEX developer. 
 
-# Preparation: We start by loading
+# Preparation
+
+We start by loading
 
 - libraries,
 
@@ -41,11 +43,7 @@ deviance_gamma <- function(y, pred) {
 prep_mat <- function(data, response = TRUE) {
   data[["Power"]] <- match(data[["Power"]], letters)
   data[["Gas"]] <- data[["Gas"]] == "Diesel"
-  
-  if (response) {
-    data[[y_name]] <- data[[y_name]] / data[[w_name]]
-  }
-  data.matrix(data[, c(x_name, if (response) y_name, w_name)])
+  data.matrix(data[c(if (response) y_name, x_name, w_name)])
 }
 
 # DATA PREPARATION
@@ -69,18 +67,20 @@ trainMat <- prep_mat(freMTPLfreq[ind, ])
 validMat <- prep_mat(freMTPLfreq[-ind, ])
 
 trainXgb <- xgb.DMatrix(trainMat[, x_name], 
-                        label = trainMat[, y_name], 
+                        label = trainMat[, y_name] / trainMat[, w_name], 
                         weight = trainMat[, w_name])
 
 ```
 
-# Then we fit three models 
+# The models
 
-- Poisson GLM
+We fit three count regressions:
 
-- Poisson tree booster with `gbm`
+- Poisson GLM: counts as response, log(exposure) as offset
 
-- Poisson tree booster with `xgboost`
+- Poisson tree booster with `gbm`: count es response, log(exposure) as offset
+
+- Poisson tree booster with `xgboost`: count / exposure as response, exposure as case weight
 
 ```{r}
 head(freMTPLfreq[c(y_name, x_name, w_name)])
@@ -116,6 +116,16 @@ param_xgb <- list(max_depth = 5,
 
 # Explaining the models
 
+We are almost ready to start interpreting the fitted models. First, we need to collect all infos per model required to make predictions and put them into an object called "explainer". It contains
+
+- The fitted model
+
+- A data set to be used to evaluate predictions
+
+- The response for above observations
+
+- A predict function
+
 ## Initializing the "explainer"
 ```{r}
 explainer_glm <- explain(fit_glm, 
@@ -133,7 +143,7 @@ explainer_gbm <- explain(fit_gbm,
 
 explainer_xgb <- explain(fit_xgb, 
                          data = validDF[c(x_name, w_name)], 
-                         y = validDF[, y_name], 
+                         y = validDF[[y_name]], 
                          label = "xgb",
                          predict_function = function(model, x) {x <- prep_mat(x, FALSE); predict(model, x[, x_name, drop = FALSE]) * x[, w_name]})
 
@@ -142,29 +152,41 @@ explainers <- list(explainer_glm, explainer_gbm, explainer_xgb)
 
 ## Model performance
 
-Issue: The function `model_performance` allows to pass a loss function of the residuals (as single argument). But in our case, we would like to show deviance residuals which would require a more general interface.
+A simple way to visualize the results of a model is to look at distributions of residuals and to compare them across models.
+
 ```{r}
 mp <- lapply(explainers, model_performance)
 do.call(plot, c(mp, geom = "boxplot"))
 ```
 
+*Issue:* The function `model_performance` allows to pass a loss function of the residuals (as single argument). But in our case, we would like to show deviance residuals which would require a more general interface. We would like to be able to pass a loss function with two arguments: Observed and predicted values.
+
 ## Variable importance on permuting validation data
-Issue: `Exposure` is required for prediction, but it would be nice to have the option to skip some variables from the calculations. Here, we manually kick them out before plotting.
+
+A model agnostic way to study variable importance is to study the worsening of the total loss if the values in variable $X$ are randomly permuted. An unimportant variable would lead to a small increase in loss if permuted, while an important one would lead to completely wrong predictions and, consequently to a large gain in loss.
+
 ```{r}
 vd <- lapply(explainers, variable_importance, loss_function = deviance_poisson, n_sample = -1)
 vd <- lapply(vd, function(x) subset(x, variable != "Exposure"))
 do.call(plot, vd)
 ```
 
+*Issue:* `Exposure` is required for prediction, but here, we would not want to permute it. We can manually kick that variableout before plotting.
+
 ## Variable importance ("prediction breakdown") for one single observation
-Issue: `Exposure` should not appear here. We would like to manually drop certain fields from calculations.
+The permutation approach provides a "global" variable importance. Additionally, it might be interesting to see which variable is responsible by how much for the prediction of an individual observation. For a linear model, this is just the value of the (centered) regressor times the model coefficient. There are different algorithms to do it in a model agnostic way: LIME, LIVE, Shapely and also prediction breakdown. Here, we use the latter. It works by iteratively evaluating how much the average prediction on the evaluation data changes if all values of variable $X$ are replaced by the corresponding value of the one observation of interest. 
+
 ```{r, fig.height=10}
 sp <- lapply(explainers, single_prediction, observation = validDF[1, ])
 do.call(plot, sp)
 ```
 
+*Issue:* `Exposure` should not appear here. We would like to manually drop certain fields from these calculations.
 
-## Effect of driver age: ceteris paribus profiles across models
+## Effect of driver age: ceteris paribus ("everything else being fixed") profiles across models
+
+Here, we pick one or more individual observations and check how their predictions change if the value of a selected variable is systematically being changed. For an additive linear model, the movement is identical for all observations. These plots make sense as long as ceteris paribus interpretations make sense (i.e. if no strong causal relationships to other regressors exist.)
+
 ```{r}
 picks <- 1
 cp <- lapply(explainers, 
@@ -182,6 +204,7 @@ plot(cp, selected_variables = "DriverAge")
 ```
 
 ## Effect of driver age: average of above profiles aka "partial dependence plots"
+If multiple ceteris paribus profiles are being aggregated, we end up with Friedman's famous partial dependence plots. 
 ```{r}
 plot(cp, selected_variables = "DriverAge", aggregate_profiles = mean)
 ```
