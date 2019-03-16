@@ -3,12 +3,10 @@
 library(CASdatasets)  # Download zip from http://cas.uqam.ca/ and install from local package source
 library(rpart)
 library(ranger)
-library(xgboost)
 library(glmnet)
 library(catboost)
+library(xgboost)
 library(lightgbm)
-library(DALEX) # For model interpretation
-library(ceterisParibus)
 library(tidyverse) # For data prep
 library(caret) # For data split
 
@@ -25,7 +23,7 @@ deviance_gamma <- function(y, pred) {
 prep_mat <- function(data, response = TRUE) {
   data[["Power"]] <- match(data[["Power"]], letters)
   data[["Gas"]] <- data[["Gas"]] == "Diesel"
-  data.matrix(data[c(if (response) y_name, x_name, w_name)])
+  data.matrix(data[c(if (response) y, x, w)])
 }
 
 # DATA PREPARATION
@@ -34,16 +32,17 @@ prep_mat <- function(data, response = TRUE) {
 data(freMTPLfreq) 
 
 # Some column names
-x_name <- c("CarAge", "DriverAge", "Power", "Gas", "Density")
-y_name <- "ClaimNb"
-w_name <- "Exposure"
+x <- c("CarAge", "DriverAge", "Power", "Gas", "Density")
+y <- "ClaimNb"
+yw <- "freq"
+w <- "Exposure"
 
 # Train/test split
 set.seed(3928272)
-ind <- caret::createDataPartition(freMTPLfreq[[y_name]], p = 0.80, list = FALSE) %>% c
+ind <- caret::createDataPartition(freMTPLfreq[[y]], p = 0.80, list = FALSE) %>% c
 
-trainDF <- freMTPLfreq[ind, ] %>% 
-  mutate(freq = ClaimNb / Exposure)
+trainDF <- freMTPLfreq[ind, ] 
+trainDF[[yw]] <- trainDF[[y]] / trainDF[[w]]
 testDF <- freMTPLfreq[-ind, ]
 
 trainMat <- prep_mat(freMTPLfreq[ind, ])
@@ -53,9 +52,9 @@ testMat <- prep_mat(freMTPLfreq[-ind, ])
 steps <- 10
 
 for (i in 0:steps) { # i <- 0
-  fit_glm <- cv.glmnet(x = trainMat[, x_name], 
-                       y = trainMat[, y_name], 
-                       offset = log(trainMat[, w_name]),
+  fit_glm <- cv.glmnet(x = trainMat[, x], 
+                       y = trainMat[, y], 
+                       offset = log(trainMat[, w]),
                        family = "poisson",
                        alpha = i / steps, 
                        nfolds = 5, 
@@ -64,38 +63,38 @@ for (i in 0:steps) { # i <- 0
   cat("\n", i / steps, "\t", min(fit_glm$cvm))
 }
 
-# Use CV to find best lambda given optimal alpha of 0
+# Use CV to find best lambda given optimal alpha
 set.seed(342)
-fit_glm <- cv.glmnet(x = trainMat[, x_name], 
-                     y = trainMat[, y_name], 
-                     offset = log(trainMat[, w_name]),
+fit_glm <- cv.glmnet(x = trainMat[, x], 
+                     y = trainMat[, y], 
+                     offset = log(trainMat[, w]),
                      family = "poisson",
-                     alpha = 0.2, 
+                     alpha = 0.4, 
                      nfolds = 5, 
                      type.measure = "deviance")
 cat("Best deviance (CV):", min(fit_glm$cvm)) # 0.2542475
 
 # # On test sample (always with best lambda)
-# pred <- predict(fit_glm, testMat[, x_name], type = "response", newoffset = log(testMat[, w_name]))
-# deviance_poisson(testMat[, y_name], pred) # 0.2545889
+# pred <- predict(fit_glm, testMat[, x], type = "response", newoffset = log(testMat[, w]))
+# deviance_poisson(testMat[, y], pred) # 0.2545889
 
 #======================================================================
 # One single tree (just for illustration)
 #======================================================================
-form <- reformulate(x_name, "freq")
+form <- reformulate(x, yw)
 
 fit_tree <- rpart(form, 
                   data = trainDF, 
                   method = "poisson", 
-                  weights = trainDF[[w_name]],
+                  weights = trainDF[[w]],
                   cp = 0.001)
 plot(fit_tree)
 text(fit_tree)
-pred <- predict(fit_tree, trainDF) * trainDF[[w_name]]
-deviance_poisson(trainMat[, y_name], pred) # 0.2526194
+pred <- predict(fit_tree, trainDF) * trainDF[[w]]
+deviance_poisson(trainMat[, y], pred) # 0.2526194
 
-# pred <- predict(fit_tree, testDF) * testDF[[w_name]]
-# deviance_poisson(testMat[, y_name], pred) # 0.2515534
+# pred <- predict(fit_tree, testDF) * testDF[[w]]
+# deviance_poisson(testMat[, y], pred) # 0.2515534
 
 #======================================================================
 # random forest (does not offer to optimize 
@@ -104,17 +103,17 @@ deviance_poisson(trainMat[, y_name], pred) # 0.2526194
 
 # Use OOB estimates to find optimal mtry (small number of trees)
 
-for (m in seq_along(x_name)) {
+for (m in seq_along(x)) {
   fit_rf <- ranger(form, 
                    data = trainDF, 
                    num.trees = 100, 
                    mtry = m, 
-                   case.weights = trainDF[[w_name]],
+                   case.weights = trainDF[[w]],
                    seed = 37 + m * 3)
   
   if (m == 1) cat("m\t deviance (OOB)")
-  cat("\n", m, "\t", deviance_poisson(trainDF[[y_name]], 
-            pmax(0.00001, fit_rf$predictions * trainDF[[w_name]])))
+  cat("\n", m, "\t", deviance_poisson(trainDF[[y]], 
+            pmax(0.00001, fit_rf$predictions * trainDF[[w]])))
 }
 
 # Use optimal mtry to fit 500 trees
@@ -124,26 +123,26 @@ fit_rf <- ranger(form,
                  importance = "impurity", 
                  num.trees = 500, 
                  mtry = m, 
-                 case.weights = trainDF[[w_name]],
+                 case.weights = trainDF[[w]],
                  seed = 837363)
-pred <- pmax(0.000001, fit_rf$predictions * trainDF[[w_name]])
-cat("Best OOB deviance:", deviance_poisson(trainDF[[y_name]], pred)) # 0.2517839
+pred <- pmax(0.000001, fit_rf$predictions * trainDF[[w]])
+cat("Best OOB deviance:", deviance_poisson(trainDF[[y]], pred)) # 0.2517839
 
 object.size(fit_rf) # 24 MB
 
 # Log-impurity gains
 barplot(fit_rf %>% importance %>% sort %>% log)
 
-# pred <- predict(fit_rf, testDF)$predictions * testDF[[w_name]]
-# deviance_poisson(testDF[[y_name]], pmax(0.00001, pred)) # 0.2534842
+# pred <- predict(fit_rf, testDF)$predictions * testDF[[w]]
+# deviance_poisson(testDF[[y]], pmax(0.00001, pred)) # 0.2534842
 
 #======================================================================
 # gradient boosting with "XGBoost"
 #======================================================================
 
-trainXgb <- xgb.DMatrix(trainMat[, x_name], 
-                        label = trainMat[, y_name] / trainMat[, w_name], 
-                        weight = trainMat[, w_name])
+trainXgb <- xgb.DMatrix(trainMat[, x], 
+                        label = trainMat[, y] / trainMat[, w], 
+                        weight = trainMat[, w])
 
 watchlist <- list(train = trainXgb)
 
@@ -186,21 +185,21 @@ for (i in seq_len(n)) { # i = 1
 head(paramGrid <- paramGrid[order(paramGrid$score), ])
 
 # Best only (no ensembling)
-cat("Best deviance (CV):", -paramGrid[1, "score"]) # 0.2519452
+cat("Best deviance (CV):", paramGrid[1, "score"]) # 0.2519452
 fit_xgb <- xgb.train(paramGrid[1, -(1:2)], 
                      data = trainXgb, 
                      nrounds = paramGrid[1, "iteration"],
                      objective = "count:poisson")
-# pred <- predict(fit_xgb, testMat[, x_name]) * testMat[, w_name]
-# deviance_poisson(testMat[, y_name], pred)  # 0.2491612
+# pred <- predict(fit_xgb, testMat[, x]) * testMat[, w]
+# deviance_poisson(testMat[, y], pred)  # 0.24914
 
 #======================================================================
 # gradient boosting with "lightGBM"
 #======================================================================
 
-trainLgb <- lgb.Dataset(trainMat[, x_name], 
-                        label = trainMat[, y_name] / trainMat[, w_name], 
-                        weight = trainMat[, w_name])
+trainLgb <- lgb.Dataset(trainMat[, x], 
+                        label = trainMat[, y] / trainMat[, w], 
+                        weight = trainMat[, w])
 
 # A grid of possible parameters
 paramGrid <- expand.grid(iteration = NA_integer_, # filled by algorithm
@@ -254,11 +253,11 @@ system.time(fit_lgb <- lgb.train(paramGrid[1, -(1:2)],
 # Interpretation
 imp_lgb <- lgb.importance(fit_lgb)
 print(imp_lgb)
-lgb.plot.importance(imp_lgb, top_n = length(x_name))
+lgb.plot.importance(imp_lgb, top_n = length(x))
 
 # # Select best and test 
-# pred <- predict(fit_lgb, testMat[, x_name]) * testMat[, w_name]
-# deviance_poisson(testMat[, y_name], pred) # 0.2490511
+# pred <- predict(fit_lgb, testMat[, x]) * testMat[, w]
+# deviance_poisson(testMat[, y], pred) # 0.2490511
 
 # Now use an average of top 3 models
 m <- 3
@@ -273,11 +272,11 @@ for (i in seq_len(m)) {
                         nrounds = paramGrid[i, "iteration"],
                         objective = "poisson",
                         verbose = -1)
-  predList[[i]] <- predict(fit_temp, testMat[, x_name]) * testMat[, w_name]
+  predList[[i]] <- predict(fit_temp, testMat[, x]) * testMat[, w]
 }
 pred <- rowMeans(do.call(cbind, predList))
 # # Test
-# deviance_poisson(testMat[, y_name], pred) # 0.2491201
+# deviance_poisson(testMat[, y], pred) # 0.2491201
 
 
 #======================================================================
@@ -285,7 +284,7 @@ pred <- rowMeans(do.call(cbind, predList))
 # not adapted yet
 #======================================================================
 
-cat_f <- which(x_name == "Power") - 1
+cat_f <- which(x == "Power") - 1
 
 # Untuned example
 param_list <- list(loss_function = "Poisson",
@@ -305,25 +304,25 @@ param_list <- list(loss_function = "Poisson",
                    metric_period = 100)
 
 # With five-fold CV
-folds <- caret::createFolds(trainDF[[y_name]], k = 5)
-pred_oof <- numeric(length(trainDF[[y_name]]))
+folds <- caret::createFolds(trainDF[[y]], k = 5)
+pred_oof <- numeric(length(trainDF[[y]]))
 best_iter <- numeric(length(folds))
 
 for (f in folds) { # f <- folds[[1]]
-  learn_pool <- catboost.load_pool(trainMat[-f, x_name], 
-                                   label = trainMat[-f, y_name] / trainMat[-f, w_name], 
-                                   weight = trainMat[-f, w_name],
+  learn_pool <- catboost.load_pool(trainMat[-f, x], 
+                                   label = trainMat[-f, y] / trainMat[-f, w], 
+                                   weight = trainMat[-f, w],
                                    cat_features = cat_f)
-  test_pool <- catboost.load_pool(trainMat[f, x_name], 
-                                  label = trainMat[f, y_name] / trainMat[f, w_name], 
-                                  weight = trainMat[f, w_name],
+  test_pool <- catboost.load_pool(trainMat[f, x], 
+                                  label = trainMat[f, y] / trainMat[f, w], 
+                                  weight = trainMat[f, w],
                                   cat_features = cat_f)
   
   fit_cb <- catboost.train(learn_pool, test_pool, params = param_list)  
   pred_oof[f] <- catboost.predict(fit_cb, test_pool)
 }
 
-deviance_poisson(trainMat[, y_name], exp(pred_oof) * trainMat[, w_name])
+deviance_poisson(trainMat[, y], exp(pred_oof) * trainMat[, w])
 
 
 # Grid search
@@ -350,7 +349,7 @@ paramGrid <- paramGrid[sample(n, 30), ]
 (n <- nrow(paramGrid)) # 100
 
 # Create CV folds
-folds <- caret::createFolds(trainMat[, y_name], k = 5)
+folds <- caret::createFolds(trainMat[, y], k = 5)
 
 rmse <- function(y, pred) {
   sqrt(mean((y - pred)^2))
@@ -364,21 +363,21 @@ for (i in seq_len(n)) {
   for (j in 1:length(folds)) { # j <- 1
     cat(".")
     f <- folds[[j]]
-    learn_pool <- catboost.load_pool(trainMat[-f, x_name], 
-                                     label = trainMat[-f, y_name] / trainMat[-f, w_name], 
-                                     weight = trainMat[-f, w_name],
+    learn_pool <- catboost.load_pool(trainMat[-f, x], 
+                                     label = trainMat[-f, y] / trainMat[-f, w], 
+                                     weight = trainMat[-f, w],
                                      cat_features = cat_f)
-    test_pool <- catboost.load_pool(trainMat[f, x_name], 
-                                    label = trainMat[f, y_name] / trainMat[f, w_name], 
-                                    weight = trainMat[f, w_name],
+    test_pool <- catboost.load_pool(trainMat[f, x], 
+                                    label = trainMat[f, y] / trainMat[f, w], 
+                                    weight = trainMat[f, w],
                                     cat_features = cat_f)
  
     fit <- catboost.train(learn_pool, 
                           test_pool, 
                           params = as.list(paramGrid[i, -(1:2)]))  
     
-    pred_oof[j] <- deviance_poisson(trainMat[f, y_name], 
-                                    exp(catboost.predict(fit, test_pool)) * trainMat[f, w_name])
+    pred_oof[j] <- deviance_poisson(trainMat[f, y], 
+                                    exp(catboost.predict(fit, test_pool)) * trainMat[f, w])
     best_iter[j] <- fit$tree_count
   }
   
@@ -402,12 +401,12 @@ best_params <- paramGrid[1, ] %>%
          border_count = 32) %>% 
   unclass
 
-fit_cb <- catboost.train(catboost.load_pool(trainMat[, x_name], 
-                                            label = trainMat[, y_name] / trainMat[, w_name], 
-                                            weight = trainMat[, w_name],
+fit_cb <- catboost.train(catboost.load_pool(trainMat[, x], 
+                                            label = trainMat[, y] / trainMat[, w], 
+                                            weight = trainMat[, w],
                                             cat_features = cat_f), 
                          params = best_params)
 
-pred <- catboost.predict(fit_cb, catboost.load_pool(testMat[, x_name],
+pred <- catboost.predict(fit_cb, catboost.load_pool(testMat[, x],
                                                     cat_features = cat_f))
-deviance_poisson(testMat[, y_name], exp(pred) * testMat[, w_name]) # 0.2632743
+deviance_poisson(testMat[, y], exp(pred) * testMat[, w]) # 0.2632743
