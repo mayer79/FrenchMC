@@ -322,7 +322,7 @@ for (f in folds) { # f <- folds[[1]]
   pred_oof[f] <- catboost.predict(fit_cb, test_pool)
 }
 
-deviance_poisson(trainMat[, y], exp(pred_oof) * trainMat[, w])
+deviance_poisson(trainMat[, y], exp(pred_oof) * trainMat[, w]) # 0.2515299
 
 
 # Grid search
