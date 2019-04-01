@@ -83,7 +83,8 @@ We fit three count regressions:
 - Poisson tree booster with `xgboost`: count / exposure as response, exposure as case weight
 
 ```{r}
-head(freMTPLfreq[c(y_name, x_name, w_name)])
+freMTPLfreq[1:6, c(y_name, x_name, w_name)] %>% 
+  kableExtra::kable()
 summary(freMTPLfreq[c(y_name, x_name, w_name)])
 
 form <- ClaimNb ~ offset(log(Exposure)) + CarAge + DriverAge + Power + Gas + Density
@@ -110,7 +111,6 @@ param_xgb <- list(max_depth = 5,
 (fit_xgb <- xgb.train(param_xgb,
                       data = trainXgb,
                       nrounds = 500))
-
 
 ```
 
@@ -159,11 +159,11 @@ mp <- lapply(explainers, model_performance)
 do.call(plot, c(mp, geom = "boxplot"))
 ```
 
-*Issue:* The function `model_performance` allows to pass a loss function of the residuals (as single argument). But in our case, we would like to show deviance residuals which would require a more general interface. We would like to be able to pass a loss function with two arguments: Observed and predicted values.
+*Issue:* The function `model_performance` allows to pass a loss function of the residuals (as single argument) only. In our case, we would like to show deviance residuals which would require a more general interface. We would like to be able to pass a loss function with two arguments: Observed and predicted values. Furthermore, more control over `ggplot` (e.g. coordinate system) would be nice.
 
 ## Variable importance on permuting validation data
 
-A model agnostic way to study variable importance is to study the worsening of the total loss if the values in variable $X$ are randomly permuted. An unimportant variable would lead to a small increase in loss if permuted, while an important one would lead to completely wrong predictions and, consequently to a large gain in loss.
+A model agnostic way to study variable importance is to study the worsening of the total loss if the values in variable X are randomly permuted. An unimportant variable would lead to a small increase in loss if permuted, while an important one would lead to completely wrong predictions and, consequently to a large gain in loss.
 
 ```{r}
 vd <- lapply(explainers, variable_importance, loss_function = deviance_poisson, n_sample = -1)
@@ -171,7 +171,7 @@ vd <- lapply(vd, function(x) subset(x, variable != "Exposure"))
 do.call(plot, vd)
 ```
 
-*Issue:* `Exposure` is required for prediction, but here, we would not want to permute it. We can manually kick that variableout before plotting.
+*Issue:* The variable `Exposure` is required for prediction, but here, we would not want to permute it. We can manually kick that variable out before plotting.
 
 ## Variable importance ("prediction breakdown") for one single observation
 The permutation approach provides a "global" variable importance. Additionally, it might be interesting to see which variable is responsible by how much for the prediction of an individual observation. For a linear model, this is just the value of the (centered) regressor times the model coefficient. There are different algorithms to do it in a model agnostic way: LIME, LIVE, Shapely and also prediction breakdown. Here, we use the latter. It works by iteratively evaluating how much the average prediction on the evaluation data changes if all values of variable $X$ are replaced by the corresponding value of the one observation of interest. 
@@ -181,7 +181,7 @@ sp <- lapply(explainers, single_prediction, observation = validDF[1, ])
 do.call(plot, sp)
 ```
 
-*Issue:* `Exposure` should not appear here. We would like to manually drop certain fields from these calculations.
+*Issue:* `Exposure` should not appear here. We would like to manually drop certain fields from these calculations. Furthermore, more control over ggplot would be nice (e.g. x axis limits).
 
 ## Effect of driver age: ceteris paribus ("everything else being fixed") profiles across models
 
@@ -196,9 +196,15 @@ cp <- lapply(explainers,
 do.call(plot, c(cp, color = "_label_", selected_variables = "DriverAge"))
 ```
 
-## Effect of driver age: multiple ceteris paribus profiles for the XGBoost model
+## Effect of driver age: multiple ceteris paribus profiles for the GLM
 ```{r}
 picks <- 1:20
+cp <- ceteris_paribus(explainer_glm, observations = validDF[picks, c(x_name, w_name)])
+plot(cp, selected_variables = "DriverAge")
+```
+
+## Effect of driver age: multiple ceteris paribus profiles for the XGBoost model
+```{r}
 cp <- ceteris_paribus(explainer_xgb, observations = validDF[picks, c(x_name, w_name)])
 plot(cp, selected_variables = "DriverAge")
 ```
