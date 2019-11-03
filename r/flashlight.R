@@ -69,9 +69,10 @@ test <- dat[ind == 10, ]
 # Modelling
 #===============================================
 
-# GLM (ca. 1 minute to fit. Can switch to glmnet)
 form <- reformulate(x, "Freq")
-fit_glm <- glm(form, 
+
+# GLM (ca. 1 minute to fit. Can switch to glmnet)
+fit_glm <- glm(form,
                data = train, 
                family = quasipoisson(), 
                weights = train[[w]])
@@ -89,7 +90,7 @@ dtrain <- lgb.Dataset(prep_lgb(train, x),
                       label = train[[y]], 
                       weight = train[[w]])
 
-# # Grid search CV (vary different parameters together first to narrow reasonable range)
+# # Grid search CV
 # paramGrid <- expand.grid(iteration = NA_integer_, # filled by algorithm
 #                          score = NA_real_,
 #                          learning_rate = 0.2, 
@@ -138,6 +139,11 @@ fit_gbm <- lgb.train(paramGrid[1, -(1:2)],
 #  Interpretation
 #===============================================
 
+# Relative improvement in Poisson deviance
+pseudo_r_squared <- function(actual, predicted, w = NULL) {
+  r_squared(actual, predicted, w = w, deviance_function = deviance_poisson)
+}
+
 # Setting up flashlights on validation data
 fl_glm <- flashlight(model = fit_glm, label = "glm", 
                      predict_function = function(fit, X) predict(fit, X, type = "response"))
@@ -147,10 +153,11 @@ fl_rf <- flashlight(model = fit_rf, label = "rf",
                     predict_function = function(fit, X) predict(fit, X)$predictions)
 fls <- multiflashlight(list(fl_glm, fl_rf, fl_gbm), 
                        data = valid, y = y, w = w,
-                       metrics = list(Deviance = deviance_poisson, Pseudo_R_squared = r_squared))
+                       metrics = list(Deviance = deviance_poisson, 
+                                      Pseudo_R_squared = pseudo_r_squared))
 
 # 1) Performance
-perf <- light_performance(fls, deviance_function = deviance_poisson)
+perf <- light_performance(fls)
 plot(perf, fill = "darkred")
 
 # 2) Permutation importance with respect to first metric (= Poisson deviance)
